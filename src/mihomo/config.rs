@@ -246,19 +246,22 @@ fn parse_profile(profile_yaml: &str) -> Result<Mapping> {
         bail!("配置顶层必须是 YAML 映射");
     };
 
-    // 结构预检只看类型是否正确，引用完整性交给内核 `-t` 终审。
-    for key in [
-        "proxies",
-        "proxy-groups",
-        "rules",
-        "proxy-providers",
-        "rule-providers",
-    ] {
+    // 普通条目是列表，provider 则按名称索引为映射；只预检容器类型，
+    // provider 内容和引用完整性仍交给同版本内核 `-t` 终审。
+    for key in ["proxies", "proxy-groups", "rules"] {
         if let Some(item) = mapping.get(Value::from(key))
             && !item.is_null()
             && !item.is_sequence()
         {
             bail!("配置字段 {key} 必须是列表");
+        }
+    }
+    for key in ["proxy-providers", "rule-providers"] {
+        if let Some(item) = mapping.get(Value::from(key))
+            && !item.is_null()
+            && !item.is_mapping()
+        {
+            bail!("配置字段 {key} 必须是映射");
         }
     }
 
@@ -666,6 +669,37 @@ proxy-groups:
         );
         // 空 proxies 属合法配置（仅内置 DIRECT），由内核 -t 终审。
         assert!(merge_runtime("proxies: []\n", &baseline()).is_ok());
+    }
+
+    #[test]
+    fn merge_accepts_named_providers_and_rejects_wrong_container_types() {
+        // 两类 provider 都是名称到配置的映射，不能与 proxies/rules 的列表混淆。
+        let profile = "\
+proxy-providers:
+  nodes:
+    type: http
+    url: https://example.com/nodes.yaml
+rule-providers:
+  domains:
+    type: http
+    behavior: domain
+    url: https://example.com/domains.yaml
+rules:
+- RULE-SET,domains,DIRECT
+";
+        let merged = merge_runtime(profile, &baseline()).expect("具名 provider 应通过预检");
+        let value: Value = serde_yaml::from_str(&merged).expect("合并产物应是有效 YAML");
+        for key in ["proxy-providers", "rule-providers"] {
+            assert!(value.get(key).is_some_and(Value::is_mapping));
+        }
+
+        for key in ["proxy-providers", "rule-providers"] {
+            for invalid in ["[]", "not-a-map"] {
+                let error = merge_runtime(&format!("{key}: {invalid}\n"), &baseline())
+                    .expect_err("provider 顶层非映射时应拒绝");
+                assert!(error.to_string().contains(&format!("{key} 必须是映射")));
+            }
+        }
     }
 
     #[test]
