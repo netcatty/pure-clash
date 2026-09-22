@@ -48,7 +48,7 @@ const PROXY_AUTO_COLLAPSE_NODES: usize = 30;
 const PROXY_AUTO_EXPAND_NODE_BUDGET: usize = 120;
 
 /// 代理节点卡片一行展示的列数。
-const PROXY_NODE_COLUMNS: usize = 3;
+const PROXY_NODE_COLUMNS: u16 = 3;
 
 /// 展开分组单页渲染的节点数上限；大分组通过“显示更多”分页浏览，
 /// 让单次布局量有硬上界，同时滚动只保留页面一层。

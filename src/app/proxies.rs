@@ -8,6 +8,48 @@ use crate::assets::{ICON_CHEVRON_DOWN, ICON_CHEVRON_RIGHT, ICON_CIRCLE_CHECK, IC
 use crate::mihomo::controller::{GroupSnapshot, NodeSnapshot};
 use crate::theme::{FontWeightExt, Palette};
 
+/// 节点全名提示独立于卡片布局，避免完整文本撑宽三列网格。
+struct NodeNameTooltip {
+    /// 原始节点名称，不使用界面中的省略文本。
+    name: SharedString,
+    /// 与触发提示的页面保持一致的主题配色。
+    palette: Palette,
+}
+
+impl Render for NodeNameTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(480.0))
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .bg(self.palette.surface)
+            .border_1()
+            .border_color(self.palette.border)
+            .shadow_md()
+            .text_sm()
+            .text_color(self.palette.text)
+            // 提示允许换行且不截断，让超长名称也能完整阅读。
+            .whitespace_normal()
+            .child(self.name.clone())
+    }
+}
+
+/// 由 GPUI 管理悬浮延迟和关闭时机，仅在实际显示提示时创建实体。
+fn node_name_tooltip(
+    name: String,
+    palette: Palette,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
+    let name = SharedString::from(name);
+    move |_, cx| {
+        cx.new(|_| NodeNameTooltip {
+            name: name.clone(),
+            palette,
+        })
+        .into()
+    }
+}
+
 fn group_kind_label(group: &GroupSnapshot) -> &'static str {
     if group.selectable {
         "proxy.kind_selector"
@@ -245,20 +287,20 @@ fn proxy_group_panel(
         .border_color(palette.border)
         .child(
             div()
+                .id(SharedString::from(format!("proxy-group-{group_index}")))
                 .flex()
                 .items_center()
                 .justify_between()
+                .cursor_pointer()
+                // 整个标题栏（含空白、当前节点、数量和箭头）都可展开/收起。
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_group_expanded(group_name.clone(), cx)
+                }))
                 .child(
                     div()
-                        .id(SharedString::from(format!("proxy-group-{group_index}")))
                         .flex()
                         .items_center()
                         .gap_2()
-                        .cursor_pointer()
-                        // 点击标题折叠/展开节点列表，避免大分组常驻布局。
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_group_expanded(group_name.clone(), cx)
-                        }))
                         .child(
                             div()
                                 .text_base()
@@ -307,16 +349,20 @@ fn proxy_group_panel(
                                 .on_click({
                                     let name = test_name.clone();
                                     cx.listener(move |this, _, _, cx| {
+                                        // 测速是独立操作，不向标题栏冒泡触发折叠。
+                                        cx.stop_propagation();
                                         this.test_group_delay(name.clone(), cx);
                                     })
                                 }),
                         )
                         .children((!expanded && !group.now.is_empty()).then(|| {
                             div()
+                                .id(SharedString::from(format!("proxy-current-{group_index}")))
                                 .max_w(px(240.0))
                                 .truncate()
                                 .text_xs()
                                 .text_color(palette.muted)
+                                .tooltip(node_name_tooltip(group.now.clone(), palette))
                                 .child(group.now.clone())
                         }))
                         .child(div().text_xs().text_color(palette.muted).child(
@@ -337,39 +383,33 @@ fn proxy_group_panel(
         // “显示更多”加载，单次布局量有硬上界，滚动只保留页面一层。
         .children(expanded.then(|| {
             let rendered = rendered.min(group.nodes.len());
-            let rows = rendered.div_ceil(PROXY_NODE_COLUMNS);
-            let mut list = div()
-                .mt_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .children((0..rows).map(|row| {
-                    let start = row * PROXY_NODE_COLUMNS;
-                    let end = (start + PROXY_NODE_COLUMNS).min(rendered);
-                    div()
-                        .flex()
-                        .gap_2()
-                        .children(group.nodes[start..end].iter().enumerate().map(
-                            |(column, node)| {
-                                proxy_node_row(
-                                    group_index,
-                                    start + column,
-                                    node,
-                                    group.now.as_str(),
-                                    app,
-                                    palette,
-                                    cx,
-                                )
-                            },
-                        ))
-                }));
+            let mut list = div().mt_3().child(
+                // 所有节点共用等宽列（minmax(0, 1fr)），避免逐行 Flex 被长名称
+                // 撑宽；末行不足三项时仍与上方列对齐，不拉伸剩余卡片。
+                div().grid().grid_cols(PROXY_NODE_COLUMNS).gap_2().children(
+                    group.nodes[..rendered]
+                        .iter()
+                        .enumerate()
+                        .map(|(node_index, node)| {
+                            proxy_node_row(
+                                group_index,
+                                node_index,
+                                node,
+                                group.now.as_str(),
+                                app,
+                                palette,
+                                cx,
+                            )
+                        }),
+                ),
+            );
             if rendered < group.nodes.len() {
                 let more_name = more_source.clone();
                 let remaining = group.nodes.len() - rendered;
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("proxy-more-{group_index}")))
-                        .mt_1()
+                        .mt_3()
                         .h(px(32.0))
                         .rounded_sm()
                         .bg(palette.surface_alt)
@@ -404,7 +444,8 @@ fn proxy_node_row(
         .id(SharedString::from(format!(
             "proxy-node-{group_index}-{node_index}"
         )))
-        .flex_1()
+        // 卡片必须允许收缩，长名称只在内部省略，不能反过来撑大网格列。
+        .min_w_0()
         .min_h(px(48.0))
         .px_3()
         .rounded_sm()
@@ -423,7 +464,7 @@ fn proxy_node_row(
         } else {
             palette.border
         })
-        .child(div().size_2().rounded_full().bg(if selected {
+        .child(div().size_2().flex_none().rounded_full().bg(if selected {
             palette.success
         } else {
             palette.border
@@ -434,10 +475,14 @@ fn proxy_node_row(
                 .min_w_0()
                 .child(
                     div()
+                        .id(SharedString::from(format!(
+                            "proxy-node-name-{group_index}-{node_index}"
+                        )))
                         .truncate()
                         .text_sm()
                         .font_medium()
                         .text_color(palette.text)
+                        .tooltip(node_name_tooltip(node.name.clone(), palette))
                         .child(node.name.clone()),
                 )
                 .child(
@@ -494,6 +539,8 @@ fn node_delay_badge(
             .py(px(2.0))
             .rounded_sm()
             .flex_none()
+            // 中英文测速状态均保持单行，不因名称变长而换行挤高卡片。
+            .whitespace_nowrap()
             .cursor_pointer()
             .bg(palette.surface_alt)
             .text_xs()
