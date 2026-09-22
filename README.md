@@ -47,7 +47,7 @@ Pure Clash 用清晰、快速的原生界面管理配置订阅、代理组、连
 | TUN 模式 | ✅ UAC + wintun | ✅ polkit + root 服务 | 未实现 |
 | 托盘 | ✅ | ✅ SNI（GNOME 需 AppIndicator 扩展） | 未实现 |
 | 单实例锁 | ✅ | ✅ | 未实现 |
-| 安装器 | ✅ NSIS per-user | ✅ deb / rpm / AppImage | 未实现 |
+| 发行包 | ✅ NSIS per-user / portable ZIP | ✅ deb / rpm / AppImage | 未实现 |
 
 Linux 使用 XDG 标准目录（`~/.config/pure-clash`、`~/.local/share/pure-clash`）；Wayland 使用带圆角、阴影与缩放边缘的客户端装饰，X11 回退系统装饰。
 
@@ -64,7 +64,7 @@ Linux 使用 XDG 标准目录（`~/.config/pure-clash`、`~/.local/share/pure-cl
 
 - Windows 10/11 x64：Rust stable + MSVC 工具链
 - Linux x64：Rust stable（Wayland/X11 会话；TUN 需要 `pkexec` 与可用的 polkit 认证代理）
-- PowerShell 7 + NSIS 3.x（仅构建 Windows 安装包时需要）
+- PowerShell 7（Windows 打包）；NSIS 3.x（仅构建 Windows 安装包时需要，便携 ZIP 不需要）
 
 ### 构建运行
 
@@ -84,7 +84,15 @@ pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 
 产物为 `dist\pure-clash-<版本>-windows-x64-setup.exe`，per-user 安装到 `%LOCALAPPDATA%\Programs\Pure Clash`，不请求管理员权限。
 
-Linux 提供 deb / rpm / AppImage，Windows 提供 NSIS 安装包：推送 `v*` 标签时由 GitHub Actions 自动构建并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)，标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash` 并创建 `/usr/bin/pure-clash` 软链，AppImage 开箱即用，所有发行包均携带内核、Geo 数据、清单与许可证文件。
+仅构建 Windows 便携包：
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1 -PackageFormat Portable
+```
+
+产物为 `dist\pure-clash-<版本>-windows-x64-portable.zip`，解压后运行 `pure-clash\pure-clash.exe`。请解压到当前用户可写的目录；配置、数据和日志会在程序旁生成，移动整个文件夹即可保留。ZIP 不包含个人配置。使用 `-PackageFormat All` 可在一次构建中同时生成安装包和便携包。
+
+Linux 提供 deb / rpm / AppImage，Windows 提供 NSIS 安装包与 portable ZIP：推送 `v*` 标签时由 GitHub Actions 自动构建并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)，标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash` 并创建 `/usr/bin/pure-clash` 软链，AppImage 开箱即用，所有发行包均携带内核、Geo 数据、清单与许可证文件。
 
 ### 开发验证
 

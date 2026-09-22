@@ -66,11 +66,11 @@
 
 - `build.rs`、`src/kernel.rs`、`kernel/{版本}/`：从随包 manifest 注入默认内核版本，并按启动配置解析运行时路径。
 
-- `packaging/windows/`：Windows 专属的 NSIS 安装器定义和 PowerShell 7 打包入口。
+- `packaging/windows/`：Windows 专属的 NSIS 安装器定义和 PowerShell 7 打包入口；build-installer.ps1 的 PackageFormat 支持 Installer（默认）、Portable、All，共用 release 构建和资源哈希校验。Portable 无需 NSIS，按发行文件白名单生成带 pure-clash 根目录的 ZIP，仅携带程序、内核/wintun、Geo 数据及许可证，不包含用户 config/data/log。
 
 - `packaging/linux/`：Linux 发行包资源（desktop 条目、图标、deb 维护脚本、rpm scriptlet、AppImage 组装脚本）；deb/rpm 元数据在 `Cargo.toml` 的 `package.metadata.deb` / `generate-rpm`，安装布局为 `/opt/pure-clash` + `/usr/bin` 软链，内核版本目录升级时同步两段 assets。完整卸载会在程序文件移除前调用内部 root 服务清理入口，升级事务不会删除软链或服务。
 
-- `.github/workflows/release.yml`：推送 `v*` 标签触发的发布流水线，构建 Windows NSIS 与 Linux deb/rpm/AppImage 并发布 GitHub Release；标签版本与 Cargo 版本不一致时直接失败。构建 job 默认只有 `contents: read`，仅发布 job 可写；外部 AppImage 工具固定不可变版本并校验官方 SHA-256。
+- `.github/workflows/release.yml`：推送 `v*` 标签触发的发布流水线，构建 Windows NSIS、portable ZIP 与 Linux deb/rpm/AppImage 并发布 GitHub Release；标签版本与 Cargo 版本不一致时直接失败。构建 job 默认只有 `contents: read`，仅发布 job 可写；外部 AppImage 工具固定不可变版本并校验官方 SHA-256。
 
 - `docs/pure-clash-architecture.md`：Mihomo 进程、REST/WebSocket 控制、安全、配置和产品化技术基线。
 
@@ -78,7 +78,7 @@
 
 - Rust 2024 edition；GPUI 使用 Zed `v1.17.2` 对应提交 `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`，平台后端使用同提交的 `gpui_platform`；`rust-i18n = 4.2.1`；Windows 托盘使用 `tray-icon = 0.24.2`；unix 目标使用 `libc` 发送 SIGTERM 与设置父进程死亡信号；非 Windows 目标使用 `directories = 6.0` 解析标准用户目录。
 
-- 当前 Cargo 包版本为 `0.2.5`；正式发布标签必须使用匹配的 `v0.2.5`，否则发布流水线会拒绝构建。
+- 当前 Cargo 包版本为 `0.2.6`；正式发布标签必须使用匹配的 `v0.2.6`，否则发布流水线会拒绝构建。
 
 - UI、业务说明和代码注释使用中文；协议字段、类型名和函数名保留英文。
 
@@ -99,6 +99,8 @@
 - 格式化：`cargo fmt --check`
 
 - 发布构建：`cargo build --release`
+
+- 便携 ZIP 打包：`pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1 -PackageFormat Portable`（All 同时生成 NSIS 与 ZIP）
 
 - NSIS 打包：`pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1`
 

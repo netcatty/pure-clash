@@ -47,7 +47,7 @@ Five primary pages plus an About page: Overview (stat cards, current outbound, r
 | TUN mode | ✅ UAC + wintun | ✅ polkit + root service | Not implemented |
 | Tray | ✅ | ✅ SNI (AppIndicator extension needed on GNOME) | Not implemented |
 | Single instance | ✅ | ✅ | Not implemented |
-| Installer | ✅ NSIS per-user | ✅ deb / rpm / AppImage | Not implemented |
+| Packages | ✅ NSIS per-user / portable ZIP | ✅ deb / rpm / AppImage | Not implemented |
 
 Linux uses XDG directories (`~/.config/pure-clash`, `~/.local/share/pure-clash`); Wayland gets client-side decorations with rounded corners, shadow and resize edges, and X11 falls back to system decorations.
 
@@ -64,7 +64,7 @@ Real-world verification so far covers only the two setups below; other Windows v
 
 - Windows 10/11 x64: Rust stable + MSVC toolchain
 - Linux x64: Rust stable (Wayland/X11 session; TUN needs `pkexec` and a polkit authentication agent)
-- PowerShell 7 + NSIS 3.x (only for building the Windows installer)
+- PowerShell 7 for Windows packaging; NSIS 3.x only for the Windows installer (not needed for portable ZIP)
 
 ### Build and run
 
@@ -84,7 +84,15 @@ pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1
 
 The output is `dist\pure-clash-<version>-windows-x64-setup.exe`, a per-user installation into `%LOCALAPPDATA%\Programs\Pure Clash` that never asks for administrator rights.
 
-Linux deb / rpm / AppImage and the Windows NSIS installer are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and every package bundles the kernel, Geo databases, manifests, and license files.
+To build only the Windows portable package (PowerShell 7 required; NSIS is not needed):
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1 -PackageFormat Portable
+```
+
+The output is `dist\pure-clash-<version>-windows-x64-portable.zip`. Extract it into a writable directory and run `pure-clash\pure-clash.exe`. Configuration, data, and logs are created alongside the executable; move the whole folder to keep them. Personal configuration is not included in the ZIP. Use `-PackageFormat All` to generate both formats from one build.
+
+Linux deb / rpm / AppImage and the Windows NSIS installer and portable ZIP are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and every package bundles the kernel, Geo databases, manifests, and license files.
 
 ### Development checks
 

@@ -1,16 +1,24 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
-构建 release 可执行文件并生成 NSIS 安装包。
+构建 release 可执行文件并生成 Windows 安装包或便携 ZIP。
 
 .PARAMETER NsisPath
 可选的 makensis.exe 完整路径。为空时依次检查 PATH 和 NSIS 默认安装目录。
 
+.PARAMETER PackageFormat
+输出格式：Installer（默认）仅生成 NSIS 安装包，Portable 仅生成便携 ZIP，
+All 同时生成两种产物。Portable 不需要安装 NSIS。
+
 .OUTPUTS
-在 dist 目录生成带 Cargo 包版本号的 Windows x64 安装程序。
+在 dist 目录生成带 Cargo 包版本号的 Windows x64 安装程序和/或便携 ZIP。
+ZIP 包含 pure-clash 根目录；首次运行时由程序生成 config、data 和 log 目录。
 #>
 [CmdletBinding()]
 param(
-    [string]$NsisPath
+    [string]$NsisPath,
+    [ValidateSet("Installer", "Portable", "All")]
+    [string]$PackageFormat = "Installer"
 )
 
 Set-StrictMode -Version Latest
@@ -36,7 +44,7 @@ function Get-CanonicalUtf8TextSha256 {
 
 Push-Location $projectRoot
 try {
-    & cargo build --release
+    & cargo build --release --locked
     if ($LASTEXITCODE -ne 0) {
         throw "cargo build --release 执行失败。"
     }
@@ -217,6 +225,53 @@ try {
         ForEach-Object { (Get-Item -LiteralPath $_).Length } |
         Measure-Object -Sum).Sum
     $installSizeKb = [int][Math]::Ceiling($installSizeBytes / 1KB)
+
+    if ($PackageFormat -in @("Portable", "All")) {
+        $portableOutput = Join-Path $distDir "pure-clash-$version-windows-x64-portable.zip"
+        # 按已校验的发行文件白名单组装 ZIP，不打包 target/release 下的用户配置、
+        # 日志或其他平台内核；根目录保持稳定，解压后可直接运行 pure-clash.exe。
+        $zipEntries = [ordered]@{
+            "pure-clash/pure-clash.exe" = $appExe
+            "pure-clash/LICENSE" = $projectLicense
+        }
+        $kernelFiles = @($kernelExe, $kernelLicense, $kernelNotice, $kernelManifest)
+        if ($wintunSource) {
+            $kernelFiles += $wintunSource
+        }
+        foreach ($source in $kernelFiles) {
+            $zipEntries["pure-clash/kernel/$kernelVersion/$([IO.Path]::GetFileName($source))"] = $source
+        }
+        foreach ($source in $geodataFiles) {
+            $zipEntries["pure-clash/geodata/$([IO.Path]::GetFileName($source))"] = $source
+        }
+
+        # 完整压缩成功后再替换最终文件，失败时不会留下看似可发布的半成品。
+        $temporaryZip = "$portableOutput.$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            $archive = [IO.Compression.ZipFile]::Open($temporaryZip, [IO.Compression.ZipArchiveMode]::Create)
+            try {
+                foreach ($entry in $zipEntries.GetEnumerator()) {
+                    [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                        $archive, $entry.Value, $entry.Key, [IO.Compression.CompressionLevel]::Optimal
+                    ) | Out-Null
+                }
+            }
+            finally {
+                $archive.Dispose()
+            }
+            [IO.File]::Move($temporaryZip, $portableOutput, $true)
+        }
+        finally {
+            if ([IO.File]::Exists($temporaryZip)) {
+                [IO.File]::Delete($temporaryZip)
+            }
+        }
+        Write-Host "便携包已生成：$portableOutput"
+    }
+    # 便携包复用全部资源校验，但不探测或调用 NSIS。
+    if ($PackageFormat -eq "Portable") {
+        return
+    }
 
     # 优先尊重显式参数，其次检查 PATH，最后检查 NSIS 的常见安装目录。
     $nsisCandidates = @()
