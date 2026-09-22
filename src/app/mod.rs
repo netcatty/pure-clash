@@ -253,13 +253,15 @@ pub(crate) struct PureClash {
     profile_form_open: bool,
     profile_form_name: Entity<TextInput>,
     profile_form_url: Entity<TextInput>,
+    /// 行内链接编辑使用独立输入实体，避免覆盖添加表单尚未提交的链接。
+    profile_edit_url: Entity<TextInput>,
     /// 配置页后台任务忙态提示；非空时禁用相关操作。
     profile_busy: Option<String>,
     profile_error: Option<String>,
     /// 正在自动更新的配置 id；与手动操作（profile_busy）互斥。
     /// 自动更新静默执行，不占用 profile_busy 以免打扰界面。
     auto_update_in_flight: Option<String>,
-    /// 行内编辑自动更新间隔的配置下标；None 表示未在编辑。
+    /// 行内编辑链接与更新间隔的配置下标；None 表示未在编辑。
     editing_profile_index: Option<usize>,
     /// 行内编辑自动更新间隔的输入框。
     profile_form_interval: Entity<TextInput>,
@@ -370,6 +372,7 @@ impl PureClash {
 
         let profile_form_name = cx.new(|cx| TextInput::new(t!("profiles.name_placeholder"), cx));
         let profile_form_url = cx.new(|cx| TextInput::new(t!("profiles.url_placeholder"), cx));
+        let profile_edit_url = cx.new(|cx| TextInput::new(t!("profiles.url_placeholder"), cx));
         let profile_form_interval =
             cx.new(|cx| TextInput::new(t!("profiles.interval_placeholder"), cx));
         let profiles = config.profiles.clone();
@@ -424,6 +427,7 @@ impl PureClash {
             profile_form_open: false,
             profile_form_name,
             profile_form_url,
+            profile_edit_url,
             profile_busy: None,
             profile_error: runtime_error,
             auto_update_in_flight: None,
@@ -1770,7 +1774,35 @@ impl PureClash {
         }
     }
 
-    /// 配置页动作互斥锁：手动忙态、行内间隔编辑或后台自动更新进行中时，
+    /// 先原子保存候选元数据，再替换界面状态；编辑和排序落盘失败时保持原列表。
+    fn commit_profile_metadata(&mut self, profiles: Vec<ProfileMeta>) -> anyhow::Result<()> {
+        let mut config = self.config.clone();
+        config.profiles = profiles.clone();
+        config.active_profile = self.active_profile.clone();
+        config.save(&self.paths.config_file)?;
+        self.config = config;
+        self.profiles = profiles;
+        Ok(())
+    }
+
+    /// 拖动仅调整展示顺序，不修改激活 ID、profile 文件或正在运行的内核。
+    fn reorder_profiles(&mut self, source_id: &str, target_id: &str, cx: &mut Context<Self>) {
+        if self.profile_actions_locked() {
+            return;
+        }
+        let mut profiles = self.profiles.clone();
+        if !profile::reorder_profiles(&mut profiles, source_id, target_id) {
+            return;
+        }
+        self.profile_error = None;
+        if let Err(error) = self.commit_profile_metadata(profiles) {
+            log_error!("profile", "保存配置排序失败：{error:#}");
+            self.profile_error = Some(t!("profiles.save_failed").into_owned());
+        }
+        cx.notify();
+    }
+
+    /// 配置页动作互斥锁：手动忙态、行内编辑或后台自动更新进行中时，
     /// 暂停其他会修改配置列表 / profile 文件的操作，避免并发写与下标漂移。
     fn profile_actions_locked(&self) -> bool {
         self.profile_busy.is_some()
@@ -2072,10 +2104,7 @@ impl PureClash {
                 // 互斥，内核 Starting 期间不做任何配置变更。
                 let index = this
                     .update(cx, |this, _| {
-                        if this.profile_busy.is_some()
-                            || this.auto_update_in_flight.is_some()
-                            || this.core_state == CoreState::Starting
-                        {
+                        if this.profile_actions_locked() || this.core_state == CoreState::Starting {
                             return None;
                         }
                         let now = profile::now_secs();
@@ -2109,6 +2138,10 @@ impl PureClash {
     /// 持久化后刷新：写 runtime 失败会回滚 profile 文件并保留旧 updated_at，
     /// 下次到期重新下载时内容比对不再命中，自然重走完整链路修复 runtime。
     fn auto_update_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        // 选中到期项后再次检查，防止行内编辑与后台更新交错修改同一订阅。
+        if self.profile_actions_locked() {
+            return;
+        }
         let Some(meta) = self.profiles.get(index) else {
             return;
         };
@@ -2282,88 +2315,86 @@ impl PureClash {
         .detach();
     }
 
-    /// 打开某个订阅行的自动更新间隔编辑器；已在编辑或忙态时忽略。
-    fn edit_profile_interval(&mut self, index: usize, cx: &mut Context<Self>) {
-        // 添加表单打开时也忽略：两者共用同一个间隔输入实体，行内回填值
-        // 不应被随后的添加提交读到。
+    /// 打开订阅编辑器，回填链接与更新间隔；添加表单和行内编辑互斥。
+    fn edit_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.profile_actions_locked() || self.profile_form_open {
             return;
         }
         let Some(meta) = self.profiles.get(index) else {
             return;
         };
-        if meta.url.is_none() {
+        let Some(url) = meta.url.clone() else {
             return;
-        }
+        };
         self.editing_profile_index = Some(index);
         let initial = if meta.update_interval_minutes == 0 {
             String::new()
         } else {
             meta.update_interval_minutes.to_string()
         };
-        self.profile_form_interval.update(cx, |input, cx| {
-            input.set_content(initial, cx);
-        });
+        self.profile_edit_url
+            .update(cx, |input, cx| input.set_content(url, cx));
+        self.profile_form_interval
+            .update(cx, |input, cx| input.set_content(initial, cx));
         self.profile_error = None;
         cx.notify();
     }
 
-    /// 保存行内编辑的自动更新间隔；非法输入给 profile_error 且保持编辑态。
-    fn save_profile_interval(&mut self, cx: &mut Context<Self>) {
+    /// 保存链接与间隔；全部校验及原子持久化成功后，链接改变才立即更新订阅。
+    fn save_profile_edits(&mut self, cx: &mut Context<Self>) {
+        if self.profile_busy.is_some() || self.auto_update_in_flight.is_some() {
+            return;
+        }
         let Some(index) = self.editing_profile_index else {
             return;
         };
-        let input = self
-            .profile_form_interval
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        match profile::parse_update_interval(&input) {
-            Ok(minutes) => {
-                // 首次设置间隔且从未更新过时，以保存时刻为基准起算，
-                // 避免旧订阅立即到期触发一次意外更新。
-                let now = profile::now_secs();
-                if let Some(meta) = self.profiles.get_mut(index) {
-                    meta.update_interval_minutes = minutes;
-                    if minutes > 0 && meta.updated_at == 0 && meta.last_auto_attempt_at == 0 {
-                        meta.last_auto_attempt_at = now;
-                    }
-                }
-                self.save_profiles();
-                let name = self
-                    .profiles
-                    .get(index)
-                    .map(|meta| meta.name.clone())
-                    .unwrap_or_default();
-                log_info!(
-                    "profile",
-                    "{name} 自动更新间隔已设为{}",
-                    if minutes == 0 {
-                        "关闭".to_owned()
-                    } else {
-                        format!("{minutes} 分钟")
-                    }
-                );
-                self.editing_profile_index = None;
-                self.profile_error = None;
-            }
+        let mut profiles = self.profiles.clone();
+        let Some(meta) = profiles.get_mut(index) else {
+            return;
+        };
+        let result = profile::edit_subscription_metadata(
+            meta,
+            self.profile_edit_url.read(cx).content(),
+            self.profile_form_interval.read(cx).content(),
+            profile::now_secs(),
+        );
+        let url_changed = match result {
+            Ok(changed) => changed,
             Err(error) => {
                 self.profile_error =
-                    Some(t!("profiles.interval_invalid", error = error.to_string()).into_owned());
+                    Some(t!("profiles.edit_invalid", error = error.to_string()).into_owned());
+                cx.notify();
+                return;
             }
+        };
+        if let Err(error) = self.commit_profile_metadata(profiles) {
+            // 保留输入和编辑态，用户可重试；不启动下载，也不显示未落盘的新值。
+            log_error!("profile", "保存订阅编辑失败：{error:#}");
+            self.profile_error = Some(t!("profiles.save_failed").into_owned());
+            cx.notify();
+            return;
+        }
+        self.editing_profile_index = None;
+        self.profile_error = None;
+        self.profile_edit_url
+            .update(cx, |input, cx| input.set_content(String::new(), cx));
+        if url_changed {
+            // 保留新地址以便重试；下载或校验失败时原 profile/runtime 仍然可用。
+            log_info!("profile", "订阅链接已修改，立即更新订阅");
+            self.update_profile(index, cx);
         }
         cx.notify();
     }
 
-    /// 取消行内间隔编辑，不落任何改动。
-    fn cancel_profile_interval_edit(&mut self, cx: &mut Context<Self>) {
+    /// 取消行内编辑，不落盘；清除链接输入，避免长期保留已放弃的地址。
+    fn cancel_profile_edit(&mut self, cx: &mut Context<Self>) {
         if self.editing_profile_index.take().is_some() {
+            self.profile_edit_url
+                .update(cx, |input, cx| input.set_content(String::new(), cx));
             self.profile_error = None;
             cx.notify();
         }
     }
-
     /// 删除配置；激活中的配置会同时回退到内置默认配置。
     fn delete_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.profile_actions_locked() {

@@ -121,6 +121,56 @@ pub(crate) fn validate_subscription_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// 修改订阅元数据；只修改内存，由调用方持久化后决定是否下载。
+///
+/// `meta` 为现有远程订阅（本地配置会报错）；`url` 为 HTTP(S) 地址，首尾空白会移除；
+/// `interval` 为分钟数字，空值或 0 表示关闭；`now` 为 UNIX 秒。
+/// 返回链接是否改变，供调用方仅在变更链接时立即更新；任何校验失败均保持原值。
+pub(crate) fn edit_subscription_metadata(
+    meta: &mut ProfileMeta,
+    url: &str,
+    interval: &str,
+    now: u64,
+) -> Result<bool> {
+    let Some(previous_url) = meta.url.as_deref() else {
+        bail!("本地配置没有订阅链接");
+    };
+    let url = url.trim();
+    validate_subscription_url(url)?;
+    let minutes = parse_update_interval(interval)?;
+    let url_changed = previous_url != url;
+    meta.url = Some(url.to_owned());
+    meta.update_interval_minutes = minutes;
+    // 从未更新的订阅首次启用定时更新时，从本次保存起算，避免意外立即到期。
+    if minutes > 0 && meta.updated_at == 0 && meta.last_auto_attempt_at == 0 {
+        meta.last_auto_attempt_at = now;
+    }
+    Ok(url_changed)
+}
+
+/// 把 `source_id` 对应配置移动到 `target_id` 原位置，其他配置保持相对顺序。
+///
+/// `profiles` 为可排序的用户配置列表（不含内置默认配置）；ID 缺失、相同或列表为空
+/// 时返回 false 且不修改列表，成功返回 true。向上拖放置于目标之前，向下则置于之后。
+pub(crate) fn reorder_profiles(
+    profiles: &mut [ProfileMeta],
+    source_id: &str,
+    target_id: &str,
+) -> bool {
+    let Some(source) = profiles.iter().position(|meta| meta.id == source_id) else {
+        return false;
+    };
+    let Some(target) = profiles.iter().position(|meta| meta.id == target_id) else {
+        return false;
+    };
+    match source.cmp(&target) {
+        std::cmp::Ordering::Less => profiles[source..=target].rotate_left(1),
+        std::cmp::Ordering::Greater => profiles[target..=source].rotate_right(1),
+        std::cmp::Ordering::Equal => return false,
+    }
+    true
+}
+
 /// 生成新的随机配置标识。
 pub(crate) fn new_profile_id() -> String {
     Uuid::new_v4().simple().to_string()
@@ -250,6 +300,132 @@ mod tests {
             update_interval_minutes: interval_minutes,
             last_auto_attempt_at: last_attempt,
         }
+    }
+
+    #[test]
+    fn editing_subscription_only_requests_download_for_changed_url() {
+        let mut meta = due_meta(60, 9_000, 8_000);
+        let original = meta.clone();
+        // 只改间隔或链接首尾空白，不下载，也不伪造内容更新时间。
+        assert!(
+            !edit_subscription_metadata(&mut meta, " https://example.com/sub ", "120", 10_000)
+                .unwrap()
+        );
+        assert_eq!(meta.update_interval_minutes, 120);
+        assert_eq!(meta.updated_at, original.updated_at);
+        assert!(
+            edit_subscription_metadata(&mut meta, "https://example.com/new", "0", 10_000).unwrap()
+        );
+        assert_eq!(meta.url.as_deref(), Some("https://example.com/new"));
+        assert_eq!(meta.id, original.id);
+        assert_eq!(meta.name, original.name);
+        assert_eq!(meta.added_at, original.added_at);
+        assert_eq!(meta.updated_at, original.updated_at);
+        assert_eq!(meta.last_auto_attempt_at, original.last_auto_attempt_at);
+        assert_eq!(meta.update_interval_minutes, 0);
+    }
+
+    #[test]
+    fn invalid_subscription_edits_preserve_all_metadata() {
+        let mut meta = due_meta(60, 9_000, 8_000);
+        let original = meta.clone();
+        // 新地址合法但间隔不合法时也不能只提交一半字段。
+        for (url, interval) in [
+            ("ftp://example.com/sub", "120"),
+            ("", "0"),
+            ("https://example.com/new", "-1"),
+        ] {
+            assert!(edit_subscription_metadata(&mut meta, url, interval, 10_000).is_err());
+            assert_eq!(meta, original);
+        }
+        meta.url = None;
+        let local = meta.clone();
+        assert!(
+            edit_subscription_metadata(&mut meta, "https://example.com/new", "60", 10_000).is_err()
+        );
+        assert_eq!(meta, local);
+    }
+
+    #[test]
+    fn enabling_interval_on_never_updated_subscription_starts_from_save_time() {
+        let mut meta = due_meta(0, 0, 0);
+        assert!(
+            !edit_subscription_metadata(&mut meta, "https://example.com/sub", "60", 10_000)
+                .unwrap()
+        );
+        assert_eq!(meta.updated_at, 0);
+        assert_eq!(meta.last_auto_attempt_at, 10_000);
+        assert!(!subscription_due(&meta, 10_000));
+        assert!(subscription_due(&meta, 13_600));
+    }
+
+    #[test]
+    fn reorder_moves_in_both_directions_without_changing_metadata() {
+        let original: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|id| {
+                let mut meta = due_meta(60, 9_000, 8_000);
+                meta.id = id.into();
+                meta
+            })
+            .collect();
+        let mut profiles = original.clone();
+        assert!(reorder_profiles(&mut profiles, "a", "c"));
+        assert_eq!(
+            profiles,
+            vec![
+                original[1].clone(),
+                original[2].clone(),
+                original[0].clone(),
+                original[3].clone()
+            ]
+        );
+        assert!(reorder_profiles(&mut profiles, "a", "b"));
+        assert_eq!(profiles, original);
+        assert!(reorder_profiles(&mut profiles, "d", "a"));
+        assert_eq!(profiles.first().unwrap().id, "d");
+        assert!(reorder_profiles(&mut profiles, "d", "c"));
+        assert_eq!(profiles, original);
+        for (source, target) in [("a", "a"), ("missing", "b"), ("a", "missing")] {
+            assert!(!reorder_profiles(&mut profiles, source, target));
+            assert_eq!(profiles, original);
+        }
+        assert!(!reorder_profiles(&mut [], "a", "b"));
+    }
+
+    #[test]
+    fn edited_url_and_order_survive_config_save_without_changing_active_profile() {
+        let root =
+            std::env::temp_dir().join(format!("pure-clash-profile-edit-{}", new_profile_id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("app.json");
+        let mut first = due_meta(60, 9_000, 8_000);
+        first.id = "first".into();
+        let mut second = first.clone();
+        second.id = "second".into();
+        let mut config = crate::config::AppConfig {
+            profiles: vec![first, second],
+            active_profile: Some("first".into()),
+            ..Default::default()
+        };
+        edit_subscription_metadata(
+            &mut config.profiles[0],
+            "https://example.com/new",
+            "120",
+            10_000,
+        )
+        .unwrap();
+        assert!(reorder_profiles(&mut config.profiles, "first", "second"));
+        config.save(&path).unwrap();
+        let saved: crate::config::AppConfig =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, config);
+        assert_eq!(saved.active_profile.as_deref(), Some("first"));
+        assert_eq!(
+            saved.profiles[1].url.as_deref(),
+            Some("https://example.com/new")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

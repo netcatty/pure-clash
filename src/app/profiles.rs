@@ -8,12 +8,40 @@ use crate::assets::{ICON_CIRCLE_CHECK, ICON_FILE_CODE, ICON_FOLDER, ICON_SEND, I
 use crate::config::ProfileMeta;
 use crate::theme::{FontWeightExt, Palette};
 
+/// GPUI 内部拖动载荷与预览；以稳定 ID 定位，不携带订阅链接。
+#[derive(Clone)]
+struct ProfileDrag {
+    /// 用户配置的持久 ID；内置默认配置不参与拖动。
+    id: String,
+    /// 预览中显示的配置名称。
+    name: SharedString,
+    /// 当前主题配色。
+    palette: Palette,
+}
+
+impl Render for ProfileDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .max_w(px(320.0))
+            .rounded_md()
+            .bg(self.palette.surface)
+            .border_1()
+            .border_color(self.palette.accent)
+            .shadow_md()
+            .text_sm()
+            .text_color(self.palette.text)
+            .child(div().truncate().child(self.name.clone()))
+    }
+}
+
 pub(super) fn render_profiles(
     app: &PureClash,
     palette: Palette,
     cx: &mut Context<PureClash>,
 ) -> AnyElement {
-    let busy = app.profile_busy.is_some() || app.editing_profile_index.is_some();
+    let busy = app.profile_actions_locked();
     div()
         .p_6()
         .child(
@@ -87,12 +115,12 @@ pub(super) fn render_profiles(
                 // 内置默认配置常驻首行：无激活订阅时即为选中态。
                 .child(default_profile_row(app, palette, cx))
                 .children({
-                    // 行内间隔编辑器紧跟被编辑的订阅行展开。
+                    // 链接与间隔编辑器紧跟被编辑的订阅行展开。
                     let mut rows: Vec<AnyElement> = Vec::new();
                     for (index, meta) in app.profiles.iter().enumerate() {
                         rows.push(profile_row(app, index, meta, palette, cx));
                         if app.editing_profile_index == Some(index) {
-                            rows.push(profile_interval_editor(app, palette, cx));
+                            rows.push(profile_editor(app, palette, cx));
                         }
                     }
                     rows
@@ -134,7 +162,7 @@ fn render_profile_form(
     palette: Palette,
     cx: &mut Context<PureClash>,
 ) -> AnyElement {
-    let busy = app.profile_busy.is_some();
+    let busy = app.profile_actions_locked();
     div()
         .mt_4()
         .p_4()
@@ -301,7 +329,7 @@ fn default_profile_row(
     cx: &mut Context<PureClash>,
 ) -> AnyElement {
     let active = app.active_profile.is_none();
-    let busy = app.profile_busy.is_some();
+    let busy = app.profile_actions_locked();
     div()
         .id("profile-builtin")
         .min_h(px(76.0))
@@ -398,9 +426,8 @@ fn profile_row(
 ) -> AnyElement {
     let active = app.active_profile.as_deref() == Some(meta.id.as_str());
     // 行内编辑或后台自动更新进行中时锁定全部行的操作。
-    let busy = app.profile_busy.is_some()
-        || app.editing_profile_index.is_some()
-        || app.auto_update_in_flight.is_some();
+    let busy = app.profile_actions_locked();
+    let target_id = meta.id.clone();
     let source = if meta.url.is_some() {
         tr("profiles.source_subscription")
     } else {
@@ -428,7 +455,7 @@ fn profile_row(
         detail.push_str(&tr("profiles.auto_failed"));
     }
     div()
-        .id(SharedString::from(format!("profile-{index}")))
+        .id(SharedString::from(format!("profile-{}", meta.id)))
         .min_h(px(76.0))
         .p_4()
         .rounded_md()
@@ -449,6 +476,45 @@ fn profile_row(
         } else {
             palette.border
         })
+        .when(!busy, |row| {
+            // 高亮目标行；释放后按当前稳定 ID 排序，不会因旧下标移动错误的配置。
+            row.drag_over::<ProfileDrag>(move |style, _, _, _| {
+                style.bg(palette.accent_soft).border_color(palette.accent)
+            })
+            .on_drop(cx.listener(move |this, dragged: &ProfileDrag, _, cx| {
+                cx.stop_propagation();
+                this.reorder_profiles(&dragged.id, &target_id, cx);
+            }))
+        })
+        .child(
+            div()
+                .id(SharedString::from(format!("profile-drag-{}", meta.id)))
+                .w(px(18.0))
+                .h_9()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                // 六点手柄直接绘制，避免引入只用于拖动的图标依赖。
+                .children((0..3).map(|_| {
+                    div().flex().gap_1().children(
+                        (0..2).map(|_| div().size(px(3.0)).rounded_full().bg(palette.muted)),
+                    )
+                }))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .when(!busy, |handle| {
+                    handle.cursor_grab().on_drag(
+                        ProfileDrag {
+                            id: meta.id.clone(),
+                            name: meta.name.clone().into(),
+                            palette,
+                        },
+                        |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                    )
+                }),
+        )
         .child(
             div()
                 .size_9()
@@ -516,7 +582,7 @@ fn profile_row(
                             .into_any_element(),
                     ]
                 })
-                // 订阅行额外提供自动更新间隔的行内编辑入口。
+                // 链接与更新间隔共用编辑入口；行内按钮不冒泡触发激活。
                 .children(meta.url.as_ref().map(|_| {
                     div()
                         .id(SharedString::from(format!("profile-edit-{index}")))
@@ -526,7 +592,7 @@ fn profile_row(
                         .flex()
                         .items_center()
                         .map(|button| {
-                            if busy {
+                            if busy || app.profile_form_open {
                                 button.opacity(0.5)
                             } else {
                                 button.cursor_pointer()
@@ -536,11 +602,10 @@ fn profile_row(
                         .text_xs()
                         .text_color(palette.muted)
                         .child(tr("profiles.edit"))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.edit_profile_interval(index, cx)
-                            }),
-                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.edit_profile(index, cx)
+                        }))
                         .into_any_element()
                 }))
                 .children(meta.url.as_ref().map(|_| {
@@ -562,7 +627,10 @@ fn profile_row(
                         .text_xs()
                         .text_color(palette.muted)
                         .child(tr("profiles.update"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.update_profile(index, cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.update_profile(index, cx);
+                        }))
                         .into_any_element()
                 }))
                 .children(Some({
@@ -584,7 +652,10 @@ fn profile_row(
                         .text_xs()
                         .text_color(rgb(0xd15b5b))
                         .child(tr("profiles.delete"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.delete_profile(index, cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.delete_profile(index, cx);
+                        }))
                         .into_any_element()
                 })),
         )
@@ -592,14 +663,10 @@ fn profile_row(
         .into_any_element()
 }
 
-/// 订阅行的自动更新间隔行内编辑器：紧跟被编辑行展开，保存/取消二选一。
-fn profile_interval_editor(
-    app: &PureClash,
-    palette: Palette,
-    cx: &mut Context<PureClash>,
-) -> AnyElement {
+/// 订阅行内编辑器：链接修改后立即更新，仅改间隔时不触发下载。
+fn profile_editor(app: &PureClash, palette: Palette, cx: &mut Context<PureClash>) -> AnyElement {
     div()
-        .id("profile-interval-editor")
+        .id("profile-editor")
         .p_4()
         .rounded_md()
         .flex()
@@ -608,6 +675,31 @@ fn profile_interval_editor(
         .bg(palette.surface)
         .border_1()
         .border_color(palette.accent)
+        .child(
+            div()
+                .text_sm()
+                .font_medium()
+                .text_color(palette.text)
+                .child(tr("profiles.url_label")),
+        )
+        .child(
+            div()
+                .p_2()
+                .rounded_sm()
+                .bg(palette.surface_alt)
+                .border_1()
+                .border_color(palette.border)
+                .text_sm()
+                .text_color(palette.text)
+                .line_height(px(20.))
+                .child(app.profile_edit_url.clone()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(tr("profiles.url_edit_hint")),
+        )
         .child(
             div()
                 .text_sm()
@@ -652,7 +744,7 @@ fn profile_interval_editor(
                         .font_medium()
                         .text_color(palette.surface)
                         .child(tr("profiles.interval_save"))
-                        .on_click(cx.listener(|this, _, _, cx| this.save_profile_interval(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.save_profile_edits(cx))),
                 )
                 .child(
                     div()
@@ -668,9 +760,7 @@ fn profile_interval_editor(
                         .text_xs()
                         .text_color(palette.muted)
                         .child(tr("profiles.interval_cancel"))
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.cancel_profile_interval_edit(cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_profile_edit(cx))),
                 ),
         )
         .into_any_element()

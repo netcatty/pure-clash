@@ -105,7 +105,7 @@ pub(crate) struct AppConfig {
     /// 强制为每条连接匹配发起进程（注入 `find-process-mode: always`）；
     /// 关闭时不注入，使用内核默认行为。开关以此文件为唯一事实来源。
     pub(crate) find_process_always: bool,
-    /// 订阅与导入的配置列表，按添加顺序展示。
+    /// 订阅与导入的配置列表，按用户拖动后的展示顺序保存；新配置追加到末尾。
     pub(crate) profiles: Vec<ProfileMeta>,
     /// 当前激活的配置 id；None 表示使用内置默认配置。
     pub(crate) active_profile: Option<String>,
